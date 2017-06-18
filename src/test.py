@@ -22,16 +22,15 @@ num_examples_valiation = 10000
 
 batch_size = 32
 lr = 5e-5
-nb_epoch = 8
+nb_epoch = 7
 batch_per_epoch = num_examples / batch_size
 
 display_step = 50
-sample_gradient_step = 1
+sample_gradient_step = 2
 validation_step = 900
 batch_per_validation = 150
 
 def _linear(inputs, n_hidden, scope=None, reuse=None):
-   print inputs
    batch_size, input_dim = inputs.get_shape().as_list()
    with tf.variable_scope(scope or 'linear', reuse=reuse) as scope:
       weights = tf.get_variable('weights', shape=[input_dim, n_hidden])
@@ -56,9 +55,8 @@ class LSTMCell(_RNNCell):
       return self._num_units
    @property
    def cell_grad(self):
-      return self._cell_grad
+      return tf.stack(self._cell_grad, axis=1)
    def __call__(self, inputs, state):
-      print "aa"
       sigmoid = tf.sigmoid
       c, h = state
       with tf.variable_scope('lstm', reuse=self._reuse) as scope:
@@ -66,7 +64,6 @@ class LSTMCell(_RNNCell):
          lstm_matrix = _linear(inp, 4 * self._num_units, scope='lstm_linear', reuse=self._reuse)
          i, j, f, o = tf.split(value=lstm_matrix, num_or_size_splits=4, axis=1)
          c = (sigmoid(f + self._forget_bias) * c + sigmoid(i) * self._gate_activation(j))
-         print c, state.c
          self._cell_grad.append(tf.gradients(c, state.c)[0])
          h = sigmoid(o) * self._output_activation(c)
       return h, tf.contrib.rnn.LSTMStateTuple(c, h)
@@ -126,7 +123,6 @@ def data_generator(batch_size, flatten, training=True):
       p += batch_size
 
 def static_LSTM(inputs, n_hidden, gate_activation, output_activation, seqlen=None, scope=None, reuse=None):
-   print inputs
    batch_size, time_step, embed_dim = inputs.get_shape().as_list()
    inputs = tf.split(inputs, time_step, axis=1)
    inputs = [tf.reshape(x, [batch_size, embed_dim]) for x in inputs]
@@ -137,16 +133,18 @@ def static_LSTM(inputs, n_hidden, gate_activation, output_activation, seqlen=Non
       return outputs, lstm_cell.cell_grad
 
 def multiLSTM(inputs, n_hiddens, gate_activation, output_activation, keep_prob, scope=None, reuse=None):
-   ret_list = []
+   grad_list = []
+   out_list = []
    with tf.variable_scope(scope or "multi_LSTM", reuse=reuse):
       rec_outputs = inputs
       for idx, n_hidden in enumerate(n_hiddens):
          scope_name = 'LSTMlayer_' + str(idx)
          if idx % 2:
             rec_outputs = tf.nn.dropout(rec_outputs, keep_prob)
-         rec_outputs, z = static_LSTM(rec_outputs, n_hidden, gate_activation, output_activation, scope=scope_name, reuse=reuse)
-         ret_list.append(rec_outputs)
-      return ret_list
+         rec_outputs, gradients = static_LSTM(rec_outputs, n_hidden, gate_activation, output_activation, scope=scope_name, reuse=reuse)
+         grad_list.append(gradients)
+         out_list.append(rec_outputs)
+      return out_list, grad_list
    
 def leaky_relu(inputs):
    alpha = 0.5
@@ -154,9 +152,10 @@ def leaky_relu(inputs):
 
 def process_grad(labels, gradients, buf, total_buf, total_std):
    def gen_buf():
+      shape = [0, gradients.shape[-2], gradients.shape[-1]]
       buf = []
       for i in xrange(num_classes):
-         buf.append(np.empty([0, num_col, num_row]))
+         buf.append(np.empty(shape))
       return buf
    if buf is None:
       buf = gen_buf()
@@ -195,7 +194,7 @@ def train(training_type, gate_activation, output_activation):
    elif training_type == 'STDL':
       flatten = False
       _shape = [batch_size, num_col, num_row]
-      n_hiddens = [64, 32, 32, 32, 32, 32, 32, 32, 16, 8]
+      n_hiddens = [32, 32, 32, 32]
    elif training_type == 'LTDL':
       flatten = True
       _shape = [batch_size, num_px, 1]
@@ -207,10 +206,9 @@ def train(training_type, gate_activation, output_activation):
    labels = tf.placeholder(dtype=tf.int32)
    keep_prob = tf.placeholder(dtype=tf.float32)
    place_holders = [images, labels]
-   all_layer_outputs = multiLSTM(images, n_hiddens, g_act, o_act, keep_prob)
-   outputs = all_layer_outputs[-1]
-   output = outputs[:, -1]
-   output = _linear(output, num_classes, scope='Decision')
+   outputs, grad_through_time = multiLSTM(images, n_hiddens, g_act, o_act, keep_prob)
+   output = outputs[-1]
+   output = _linear(output[:, -1], num_classes, scope='Decision')
    output = tf.reshape(output, [batch_size, num_classes])
    loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=labels, logits=output)
    loss = tf.reduce_mean(loss)
@@ -218,20 +216,27 @@ def train(training_type, gate_activation, output_activation):
    accuracy = tf.cast(tf.equal(pred, labels), tf.float32)
    accuracy = tf.reduce_mean(accuracy)
    train_op = tf.train.AdamOptimizer(learning_rate=lr).minimize(loss)
-
    _name = training_type + '_Gate_Activation_' + gate_activation + '_Output_activation_' + output_activation
-   with tf.name_scope(_name):
-      grad_through_time = tf.abs(tf.gradients(loss, images)[0])
-      grad_through_time = tf.reshape(grad_through_time, [batch_size, num_col, num_row])
-      grad_through_layer = tf.gradients(loss, all_layer_outputs)
-      grad_through_layer = [tf.reduce_mean(grad_layer ** 2) for grad_layer in grad_through_layer]
+#   grad_by_input = tf.abs(tf.gradients(loss, images)[0])
+   grad_by_layer = [tf.gradients(loss, images)[0]]
+   _name_grad = ['loss-input']
+   for idx, x in enumerate(outputs):
+      g = tf.gradients(loss, outputs[idx])[0]
+      grad_by_layer.append(g)
+      _name_grad.append('loss' + '-layer' + str(idx+1))
+   grad_by_layer = [tf.abs(grad) for grad in grad_by_layer]
 
+   num_ob = len(grad_by_layer)
+   print grad_by_layer, _name_grad
    gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.6)
    with tf.Session(config=tf.ConfigProto(gpu_options=gpu_options)) as sess:
       train_writer = tf.summary.FileWriter(summary_dir + 'train', sess.graph)
       init = tf.global_variables_initializer()
       sess.run(init)
-      gradient_buffer, total_buffer, total_std_buffer = None, None, None
+      #gradient_buffer, total_buffer, total_std_buffer
+      total_iterator = []
+      for i in xrange(num_ob):
+         total_iterator.append([None, None, None])
       for epoch in xrange(nb_epoch):
          _total_loss, _total_acc, = 0, 0
          for batch in xrange(batch_per_epoch):
@@ -239,11 +244,13 @@ def train(training_type, gate_activation, output_activation):
             _labels = input_datas[1].astype(np.int32)
             feed_dict = {a: b for a, b in zip(place_holders, input_datas)}
             feed_dict[keep_prob] = 0.8
-            run_list = [train_op, loss, accuracy, grad_through_time]
-            _, _loss, _acc, _grad = sess.run(run_list, feed_dict=feed_dict)
+            run_list = [train_op, loss, accuracy] + grad_by_layer
+            all_ret = sess.run(run_list, feed_dict=feed_dict)
+            _, _loss, _acc = all_ret[:3]
+            _grads = all_ret[3:]
             _total_loss += _loss
             _total_acc += _acc
-            gradient_buffer, total_buffer, total_std_buffer = process_grad(_labels, _grad, gradient_buffer, total_buffer, total_std_buffer)
+            total_iterator = [process_grad(_labels, b, *a) for a, b in zip(total_iterator, _grads)]
             if (batch + 1) % display_step == 0:
                print "Epoch : ", epoch + 1, "Batch : ", batch + 1, '/', batch_per_epoch, \
                      "Type : ", _name, \
@@ -262,11 +269,13 @@ def train(training_type, gate_activation, output_activation):
                      "Type : ", _name, \
                      "Loss : ", "{:.6f}".format(_total_loss_val / batch_per_validation), \
                      "Accuracy : ", "{:.6f}".format(_total_acc_val / batch_per_validation)
-   save_dict = {str(idx): x for idx, x in enumerate(total_buffer)}
-   save_dict_std = {str(idx): x for idx, x in enumerate(total_std_buffer)}
-   with open(os.path.join(np_dir, saving_filenames[0]), 'wb') as f:
-      np.savez(f, **save_dict)
-   with open(os.path.join(np_dir, saving_filenames[1]), 'wb') as f:
-      np.savez(f, **save_dict_std)
+   for _iterator, a_name_grad in zip(total_iterator, _name_grad):
+      save_dict = {str(idx): x for idx, x in enumerate(_iterator[1])}
+      save_dict_std = {str(idx): x for idx, x in enumerate(_iterator[2])}
+      tmp_n = _name + '_' + a_name_grad + '_'
+      with open(os.path.join(np_dir, tmp_n + saving_filenames[0]), 'wb') as f:
+         np.savez(f, **save_dict)
+      with open(os.path.join(np_dir, tmp_n + saving_filenames[1]), 'wb') as f:
+         np.savez(f, **save_dict_std)
 
-train('STDL', 'elu', 'elu')
+train('STDL', 'tanh', 'tanh')
