@@ -5,8 +5,8 @@ import matplotlib.pyplot as plt
 
 import os
 
-np_dir = '../numpy_array/'
-saving_dir = '../gif/'
+np_dir = './numpy_array/'
+saving_dir = './gif/'
 input_filenames = ['gradient_images', 'std_images']
 saving_filenames = ['gradient', 'std']
 

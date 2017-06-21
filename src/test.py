@@ -6,9 +6,9 @@ from tensorflow.python.ops.rnn_cell_impl import _RNNCell
 import numpy as np
 import os
 
-data_dir = '../MNIST_data/'
-summary_dir = '../summary/'
-np_dir = '../numpy_array/'
+data_dir = './MNIST_data/'
+summary_dir = './summary/'
+np_dir = './numpy_array/'
 saving_filenames = ['gradient_images', 'std_images']
 training_filenames = ['train-images-idx3-ubyte', 'train-labels-idx1-ubyte']
 validation_filenames = ['t10k-images-idx3-ubyte', 't10k-labels-idx1-ubyte']
